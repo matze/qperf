@@ -263,7 +263,7 @@ static void run_benchmark(gboolean use_queue_profiling)
 {
     opencl_desc *ocl = ocl_new(use_queue_profiling);
 
-    for (int i = 256; i < 4096; i *= 2) {
+    for (int i = 256; i < 4096; i += 256) {
         gdouble total_time = 0.0;
         gdouble min_time = G_MAXDOUBLE;
         gdouble max_time = 0.0;
