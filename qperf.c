@@ -40,6 +40,8 @@ typedef struct {
     float **host_data;
     cl_mem *dev_data_in;
     cl_mem *dev_data_out;
+    guint width;
+    guint height;
 } test_environment;
 
 static const gchar* opencl_error_msgs[] = {
@@ -108,44 +110,13 @@ const gchar* opencl_map_error(int error)
 #define CHECK_ERROR(error) { \
     if ((error) != CL_SUCCESS) g_message("OpenCL error <%s:%i>: %s", __FILE__, __LINE__, opencl_map_error((error))); }
 
-static gchar *ocl_read_program(const gchar *filename)
+cl_program ocl_get_program(opencl_desc *ocl, const gchar *source, const gchar *options)
 {
-    FILE *fp = fopen(filename, "r");
-    if (fp == NULL)
-        return NULL;
-
-    fseek(fp, 0, SEEK_END);
-    const size_t length = ftell(fp);
-    rewind(fp);
-
-    gchar *buffer = (gchar *) g_malloc0(length);
-    if (buffer == NULL) {
-        fclose(fp);
-        return NULL;
-    }
-
-    size_t buffer_length = fread(buffer, 1, length, fp);
-    fclose(fp);
-    if (buffer_length != length) {
-        g_free(buffer);
-        return NULL;
-    }
-    return buffer;
-}
-
-cl_program ocl_get_program(opencl_desc *ocl, const gchar *filename, const gchar *options)
-{
-    gchar *buffer = ocl_read_program(filename);
-    if (buffer == NULL) 
-        return FALSE;
-
     int errcode = CL_SUCCESS;
-    cl_program program = clCreateProgramWithSource(ocl->context, 1, (const char **) &buffer, NULL, &errcode);
+    cl_program program = clCreateProgramWithSource(ocl->context, 1, (const char **) &source, NULL, &errcode);
 
-    if (errcode != CL_SUCCESS) {
-        g_free(buffer);
+    if (errcode != CL_SUCCESS)
         return NULL;
-    }
 
     errcode = clBuildProgram(program, ocl->num_devices, ocl->devices, options, NULL, NULL);
 
@@ -153,13 +124,11 @@ cl_program ocl_get_program(opencl_desc *ocl, const gchar *filename, const gchar 
         const int LOG_SIZE = 4096;
         gchar* log = (gchar *) g_malloc0(LOG_SIZE * sizeof(char));
         CHECK_ERROR(clGetProgramBuildInfo(program, ocl->devices[0], CL_PROGRAM_BUILD_LOG, LOG_SIZE, (void*) log, NULL));
-        g_print("\n=== Build log for %s===%s\n\n", filename, log);
+        g_print("\n=== Build log ===%s\n\n", log);
         g_free(log);
-        g_free(buffer);
         return NULL;
     }
 
-    g_free(buffer);
     return program;
 }
 
@@ -203,14 +172,20 @@ static void ocl_free(opencl_desc *ocl)
     g_free(ocl);
 }
 
-static test_environment *env_new(opencl_desc *ocl, int width, int height, int num_images)
+static test_environment *env_new(opencl_desc *ocl, int width, int height)
 {
+    static const char *source = "\
+__kernel void test(__global float *input, __global float *output)\
+{ \
+    const int idx = get_global_id(1) * get_global_size(0) + get_global_id(0); \
+    output[idx] = input[idx] * 2.0f; \
+}";
+
     cl_int errcode = CL_SUCCESS;
     test_environment *env = g_malloc0(sizeof(test_environment));
 
-    env->program = ocl_get_program(ocl, "simple.cl", "");
+    env->program = ocl_get_program(ocl, source, "");
     if (env->program == NULL) {
-        g_warning("Could not open simple.cl");
         ocl_free(ocl);
         return NULL;
     }
@@ -221,12 +196,14 @@ static test_environment *env_new(opencl_desc *ocl, int width, int height, int nu
 
     /* Generate four data images */
     size_t image_size = width * height * sizeof(float);
-    env->num_images = num_images;
-    env->host_data = (float **) g_malloc0(num_images * sizeof(float *));
-    env->dev_data_in = (cl_mem *) g_malloc0(num_images * sizeof(cl_mem));
-    env->dev_data_out = (cl_mem *) g_malloc0(num_images * sizeof(cl_mem));
+    env->width = width;
+    env->height = height;
+    env->num_images = 8;
+    env->host_data = (float **) g_malloc0(env->num_images * sizeof(float *));
+    env->dev_data_in = (cl_mem *) g_malloc0(env->num_images * sizeof(cl_mem));
+    env->dev_data_out = (cl_mem *) g_malloc0(env->num_images * sizeof(cl_mem));
 
-    for (int i = 0; i < num_images; i++) {
+    for (int i = 0; i < env->num_images; i++) {
         env->host_data[i] = (float *) g_malloc0(image_size);
         env->dev_data_in[i] = clCreateBuffer(ocl->context, 
                 CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, image_size, env->host_data[i], &errcode);
@@ -244,26 +221,21 @@ static void env_free(test_environment *env)
         CHECK_ERROR(clReleaseMemObject(env->dev_data_in[i]));
         CHECK_ERROR(clReleaseMemObject(env->dev_data_out[i]));
     }
+
     clReleaseKernel(env->kernel);
     clReleaseProgram(env->program);
     g_free(env->host_data);
     g_free(env);
 }
 
-int profile_queue(gboolean use_queue_profiling, int width, int height, int num_images)
+gdouble profile_queue(opencl_desc *ocl, test_environment *env)
 {
-    cl_int errcode = CL_SUCCESS;
-    opencl_desc *ocl = ocl_new(use_queue_profiling);
-    test_environment *env = env_new(ocl, width, height, num_images);
-    if (env == NULL)
-        return 1;
-
-    cl_event events[num_images];
-    cl_event read_events[num_images];
-    size_t global_work_size[2] = { width, height };
-
-    /* Measure single GPU case */
+    gdouble result;
+    cl_event events[env->num_images];
+    cl_event read_events[env->num_images];
+    size_t global_work_size[2] = { env->width, env->height };
     GTimer *timer = g_timer_new();
+
     for (int i = 0; i < env->num_images; i++) {
         CHECK_ERROR(clSetKernelArg(env->kernel, 0, sizeof(cl_mem), (void *) &env->dev_data_in[i]))
         CHECK_ERROR(clSetKernelArg(env->kernel, 1, sizeof(cl_mem), (void *) &env->dev_data_out[i]));
@@ -278,31 +250,48 @@ int profile_queue(gboolean use_queue_profiling, int width, int height, int num_i
     }
 
     clWaitForEvents(env->num_images, read_events);
-    g_timer_stop(timer);
-    g_print("\t%f", g_timer_elapsed(timer, NULL));
+    result = g_timer_elapsed(timer, NULL);
     g_timer_destroy(timer);
     
     for (int i = 0; i < env->num_images; i++)
         CHECK_ERROR(clReleaseEvent(events[i]));
 
-    env_free(env);
+    return result;
+}
+
+static void run_benchmark(gboolean use_queue_profiling)
+{
+    opencl_desc *ocl = ocl_new(use_queue_profiling);
+
+    for (int i = 256; i < 4096; i *= 2) {
+        /* for (int j = i; j < 2048; j *= 2) { */
+            gdouble total_time = 0.0;
+            gdouble min_time = G_MAXDOUBLE;
+            gdouble max_time = 0.0;
+            test_environment *env = env_new(ocl, i, i);
+
+            for (int k = 0; k < 16; k++) {
+                gdouble time = profile_queue(ocl, env);
+                total_time += time;
+                min_time = MIN(min_time, time);
+                max_time = MAX(max_time, time);
+            }
+
+            g_print("%i %i %i %f %f %f\n", (int) use_queue_profiling,
+                    i, i, total_time / 16.0, min_time, max_time);
+
+            env_free(env);
+        /* } */
+    }
+
     ocl_free(ocl);
-    return 0;
 }
 
 int main(int argc, char const* argv[])
 {
-    g_print("# width height num_images no_profiling profiling\n");
-    for (int i = 32; i < 256; i += 32) {
-        for (int j = 32; j < 256; j += 32) {
-            for (int k = 16; k < 64; k+= 8) {
-                g_print("%i\t%i\t%i", i, j, k);
-                profile_queue(FALSE, i, j, k);
-                profile_queue(TRUE, i, j, k);
-                g_print("\n");
-            }
-        }
-    }
+    g_print("# profiling? width height avg min max\n");
+    run_benchmark(TRUE);
+    run_benchmark(FALSE);
 
     return 0;
 }
