@@ -264,24 +264,22 @@ static void run_benchmark(gboolean use_queue_profiling)
     opencl_desc *ocl = ocl_new(use_queue_profiling);
 
     for (int i = 256; i < 4096; i *= 2) {
-        /* for (int j = i; j < 2048; j *= 2) { */
-            gdouble total_time = 0.0;
-            gdouble min_time = G_MAXDOUBLE;
-            gdouble max_time = 0.0;
-            test_environment *env = env_new(ocl, i, i);
+        gdouble total_time = 0.0;
+        gdouble min_time = G_MAXDOUBLE;
+        gdouble max_time = 0.0;
+        test_environment *env = env_new(ocl, i, i);
 
-            for (int k = 0; k < 16; k++) {
-                gdouble time = profile_queue(ocl, env);
-                total_time += time;
-                min_time = MIN(min_time, time);
-                max_time = MAX(max_time, time);
-            }
+        for (int k = 0; k < 16; k++) {
+            gdouble time = profile_queue(ocl, env);
+            total_time += time;
+            min_time = MIN(min_time, time);
+            max_time = MAX(max_time, time);
+        }
 
-            g_print("%i %i %i %f %f %f\n", (int) use_queue_profiling,
-                    i, i, total_time / 16.0, min_time, max_time);
+        g_print("%i %i %i %f %f %f\n", (int) use_queue_profiling,
+                i, i, total_time / 16.0, min_time, max_time);
 
-            env_free(env);
-        /* } */
+        env_free(env);
     }
 
     ocl_free(ocl);
