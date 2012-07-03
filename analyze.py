@@ -20,7 +20,12 @@ if __name__ == '__main__':
         '188487', 'E24A33']}
 
     matplotlib.rc('font', **font)
-    matplotlib.rc('axes', **axes)
+
+    try:
+        # this does not work with older matplotlib version
+        matplotlib.rc('axes', **axes)
+    except:
+        pass
 
     for filename in sys.argv[1:]:
         plot_data(filename)
